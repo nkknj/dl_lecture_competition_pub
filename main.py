@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, Any
 import os
 import time
-
+from torch.nn import functional as F
 
 class RepresentationType(Enum):
     VOXEL = auto()
@@ -27,14 +27,35 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
 
-def compute_epe_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor):
+#def compute_epe_error(pred_flow: torch.Tensor, gt_flow: torch.Tensor):
+#    '''
+#    end-point-error (ground truthと予測値の二乗誤差)を計算
+#    pred_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 予測したオプティカルフローデータ
+#    gt_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 正解のオプティカルフローデータ
+#    '''
+#    epe = torch.mean(torch.mean(torch.norm(pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
+#    return epe
+
+def compute_epe_error(pred_flow: torch.Tensor, gt_flow3: torch.Tensor, ep=-1):
     '''
     end-point-error (ground truthと予測値の二乗誤差)を計算
     pred_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 予測したオプティカルフローデータ
     gt_flow: torch.Tensor, Shape: torch.Size([B, 2, 480, 640]) => 正解のオプティカルフローデータ
     '''
-    epe = torch.mean(torch.mean(torch.norm(pred_flow - gt_flow, p=2, dim=1), dim=(1, 2)), dim=0)
-    return epe
+    r=0.1
+    #gt_flow2=F.adaptive_avg_pool2d(gt_flow3, pred_flow['flow2'].shape[-2:])
+    #gt_flow1=F.adaptive_avg_pool2d(gt_flow2, pred_flow['flow1'].shape[-2:])
+    #gt_flow0=F.adaptive_avg_pool2d(gt_flow1, pred_flow['flow0'].shape[-2:])
+    gt_flow2=F.adaptive_max_pool2d(gt_flow3, pred_flow['flow2'].shape[-2:])
+    gt_flow1=F.adaptive_max_pool2d(gt_flow2, pred_flow['flow1'].shape[-2:])
+    gt_flow0=F.adaptive_max_pool2d(gt_flow1, pred_flow['flow0'].shape[-2:])
+
+    epe3 = torch.mean(torch.mean(torch.norm(pred_flow['flow3'] - gt_flow3, p=2, dim=1), dim=(1, 2)), dim=0)
+    epe2 = torch.mean(torch.mean(torch.norm(pred_flow['flow2'] - gt_flow2, p=2, dim=1), dim=(1, 2)), dim=0)
+    epe1 = torch.mean(torch.mean(torch.norm(pred_flow['flow1'] - gt_flow1, p=2, dim=1), dim=(1, 2)), dim=0)
+    epe0 = torch.mean(torch.mean(torch.norm(pred_flow['flow0'] - gt_flow0, p=2, dim=1), dim=(1, 2)), dim=0)
+    out=epe3+r*epe0+r*epe1+r*epe2
+    return out
 
 def save_optical_flow_to_npy(flow: torch.Tensor, file_name: str):
     '''
@@ -111,6 +132,7 @@ def main(args: DictConfig):
     #       Model
     # ------------------
     model = EVFlowNet(args.train).to(device)
+    model = torch.nn.DataParallel(model)
 
     # ------------------
     #   optimizer
@@ -128,7 +150,7 @@ def main(args: DictConfig):
             event_image = batch["event_volume"].to(device) # [B, 4, 480, 640]
             ground_truth_flow = batch["flow_gt"].to(device) # [B, 2, 480, 640]
             flow = model(event_image) # [B, 2, 480, 640]
-            loss: torch.Tensor = compute_epe_error(flow, ground_truth_flow)
+            loss: torch.Tensor = compute_epe_error(flow, ground_truth_flow, ep=epoch)
             print(f"batch {i} loss: {loss.item()}")
             optimizer.zero_grad()
             loss.backward()
@@ -158,7 +180,7 @@ def main(args: DictConfig):
             batch: Dict[str, Any]
             event_image = batch["event_volume"].to(device)
             batch_flow = model(event_image) # [1, 2, 480, 640]
-            flow = torch.cat((flow, batch_flow), dim=0)  # [N, 2, 480, 640]
+            flow = torch.cat((flow, batch_flow['flow3']), dim=0)  # [N, 2, 480, 640]
         print("test done")
     # ------------------
     #  save submission
